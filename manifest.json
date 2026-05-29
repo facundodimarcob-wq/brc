@@ -1,10 +1,11 @@
 {
   "name": "Sistema Estado BRC",
   "short_name": "BRC Estado",
-  "start_url": "./index.html",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#f4f4f9",
   "theme_color": "#007bff",
+  "gcm_sender_id": "1039543458306",
   "icons": [
     {
       "src": "https://cdn-icons-png.flaticon.com/512/3602/3602149.png",
