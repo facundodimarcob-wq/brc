@@ -109,7 +109,6 @@
             if(!email || !password || !grupo) return alert("Por favor llena todos los campos");
 
             try {
-                // Verificar primero si el grupo existe y si está lleno
                 const grupoDocRef = doc(db, "grupos", grupo);
                 const grupoSnap = await getDoc(grupoDocRef);
                 
@@ -120,7 +119,6 @@
                     const qMiembros = query(collection(db, "usuarios"), where("grupoID", "==", grupo));
                     const snapMiembros = await getDocs(qMiembros);
                     
-                    // Si el usuario ya pertenecía al grupo, lo dejamos pasar aunque esté lleno
                     let yaEsMiembro = false;
                     snapMiembros.forEach(d => { if(d.data().email === email) yaEsMiembro = true; });
 
@@ -140,7 +138,6 @@
 
                 const uid = userCredential.user.uid;
                 
-                // Si el grupo no existía en la base de datos, este usuario se vuelve el Admin creador
                 if (!grupoSnap.exists()) {
                     await setDoc(grupoDocRef, { estado: "libre", limiteUsuarios: 10, creadorUid: uid });
                 }
@@ -159,7 +156,6 @@
                 
                 const userDocSnap = await getDoc(doc(db, "usuarios", user.uid));
                 if (!userDocSnap.exists() || !userDocSnap.data().grupoID) {
-                    // Si el usuario fue echado por el admin, lo mandamos al login
                     ejecutarSalidaUI();
                     return;
                 }
@@ -179,12 +175,10 @@
             if (desvincularEscuchaGrupo) desvincularEscuchaGrupo();
             if (desvincularEscuchaMiembros) desvincularEscuchaMiembros();
 
-            // 1. Escuchar datos del grupo (Estado y límites)
             desvincularEscuchaGrupo = onSnapshot(doc(db, "grupos", grupoId), (docSnap) => {
                 if (docSnap.exists()) {
                     const datos = docSnap.data();
                     
-                    // Chequear si soy el admin
                     esAdmin = (datos.creadorUid === usuarioActual.uid);
                     if (esAdmin) {
                         document.getElementById('admin-panel').classList.remove('hidden');
@@ -199,15 +193,21 @@
                         document.getElementById('encargado').classList.remove('hidden');
                         document.getElementById('encargado').querySelector('span').innerText = datos.solicitadoPor || "Desconocido";
                         iniciarContador(datos.finOcupado.toMillis());
+                        
                         document.getElementById('selectores-tiempo').classList.add('hidden');
-                        document.getElementById('btn-detener').classList.remove('hidden');
+                        
+                        // CORRECCIÓN SEGURIDAD: Solo el que lo ocupó o el Admin ve el botón de liberar
+                        if (datos.solicitadoPorUid === usuarioActual.uid || esAdmin) {
+                            document.getElementById('btn-detener').classList.remove('hidden');
+                        } else {
+                            document.getElementById('btn-detener').classList.add('hidden');
+                        }
                     } else {
                         resetearContadorUI();
                     }
                 }
             });
 
-            // 2. Escuchar lista de miembros conectados
             const q = query(collection(db, "usuarios"), where("grupoID", "==", grupoId));
             desvincularEscuchaMiembros = onSnapshot(q, (querySnapshot) => {
                 const lista = document.getElementById('lista-participantes');
@@ -223,7 +223,6 @@
                     const li = document.createElement('li');
                     li.textContent = datosUser.email;
 
-                    // Si soy admin y este integrante no soy yo mismo, le clavo botón de echar
                     if (esAdmin && datosUser.uid !== usuarioActual.uid) {
                         const btnEchar = document.createElement('button');
                         btnEchar.textContent = "Echar ❌";
@@ -235,7 +234,6 @@
                     lista.appendChild(li);
                 });
 
-                // Si el Admin me echó, mi usuario ya no figurará en la consulta de este grupo
                 if (!yoSigoEnLaLista && usuarioActual) {
                     alert("Has sido removido de este grupo por el Administrador.");
                     signoutProceso();
@@ -243,30 +241,33 @@
             });
         }
 
-        // ACCIÓN DE LOS BOTONES DE TIEMPO
         document.querySelectorAll('.btn-time').forEach(boton => {
             boton.addEventListener('click', async (e) => {
                 if (!grupoActualId || !usuarioActual) return;
                 const minutos = parseInt(e.target.getAttribute('data-mins'));
                 const tiempoFin = Date.now() + (minutos * 60 * 1000); 
+                
                 await setDoc(doc(db, "grupos", grupoActualId), {
                     estado: "ocupado",
                     finOcupado: new Date(tiempoFin),
-                    solicitadoPor: usuarioActual.email
+                    solicitadoPor: usuarioActual.email,
+                    solicitadoPorUid: usuarioActual.uid // Guardamos el UID para validar el bloqueo
                 }, { merge: true });
 
                 enviarPushANotificar("¡BRC Ocupado! 🚨", `${usuarioActual.email} pidió el tiempo por ${minutos === 60 ? '1 hora' : minutos + ' minutos'}.`);
             });
         });
 
-        // ACCIÓN DE DETENER
         document.getElementById('btn-detener').addEventListener('click', async () => {
             if (!grupoActualId || !usuarioActual) return;
-            await setDoc(doc(db, "grupos", grupoActualId), { estado: "libre", solicitadoPor: "" }, { merge: true });
+            await setDoc(doc(db, "grupos", grupoActualId), { 
+                estado: "libre", 
+                solicitadoPor: "",
+                solicitadoPorUid: "" 
+            }, { merge: true });
             enviarPushANotificar("BRC Libre ✅", `${usuarioActual.email} liberó el puesto.`);
         });
 
-        // ACTUALIZAR LÍMITE DE USUARIOS (SOLO ADMIN)
         document.getElementById('btn-actualizar-limite').addEventListener('click', async () => {
             const nuevoLimite = parseInt(document.getElementById('input-limite').value);
             if (!nuevoLimite || nuevoLimite < 1) return alert("Pon un número válido");
@@ -274,15 +275,12 @@
             alert("Límite del grupo actualizado a " + nuevoLimite);
         });
 
-        // ACCIÓN DE ECHAR PARTICIPANTE (SOLO ADMIN)
         async function echarParticipante(uid, email) {
             if (confirm(`¿Estás seguro de que deseas echar a ${email} del grupo?`)) {
-                // Borramos su asignación de grupo en la base de datos
                 await deleteDoc(doc(db, "usuarios", uid));
             }
         }
 
-        // LOGOUT / CAMBIAR DE GRUPO
         document.getElementById('btn-logout').addEventListener('click', () => {
             signoutProceso();
         });
@@ -290,7 +288,6 @@
         async function signoutProceso() {
             if (usuarioActual) {
                 try {
-                    // Limpiamos el token push de este usuario para que no le lleguen más alertas de este grupo
                     await updateDoc(doc(db, "usuarios", usuarioActual.uid), { tokenPush: "" });
                 } catch(e){}
             }
@@ -337,7 +334,7 @@
                 const diferencia = tiempoFin - Date.now();
                 if (diferencia <= 0) {
                     clearInterval(intervaloContador);
-                    updateDoc(doc(db, "grupos", grupoActualId), { estado: "libre" });
+                    updateDoc(doc(db, "grupos", grupoActualId), { estado: "libre", solicitadoPorUid: "" });
                     resetearContadorUI();
                     return;
                 }
