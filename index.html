@@ -14,13 +14,20 @@
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background-color: #f4f4f9; text-align: center; color: #333; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); max-width: 350px; margin: 20px auto; }
         input { width: 85%; padding: 10px; margin: 8px 0; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
-        button { background-color: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; width: 90%; }
+        button { background-color: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; width: 90%; margin-bottom: 8px; }
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        .btn-group { display: flex; gap: 8px; justify-content: center; width: 90%; margin: 0 auto 10px auto; }
+        .btn-time { background-color: #28a745; font-size: 14px; padding: 10px; width: 33%; }
+        #btn-detener { background-color: #dc3545; }
+        #btn-logout { background-color: #6c757d; font-size: 14px; padding: 8px; width: auto; margin-top: 15px; }
         .hidden { display: none; }
         #contador { font-size: 28px; color: #dc3545; font-weight: bold; margin: 15px 0; }
         #encargado { font-size: 14px; color: #666; font-style: italic; margin-bottom: 10px; }
         ul { list-style: none; padding: 0; text-align: left; }
-        li { padding: 8px; border-bottom: 1px solid #eee; }
+        li { padding: 8px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .btn-echar { background-color: #dc3545; color: white; font-size: 12px; padding: 4px 8px; width: auto; margin: 0; border-radius: 4px; }
+        .admin-box { background-color: #fff3cd; border: 1px solid #ffeeba; border-radius: 8px; padding: 15px; margin-top: 20px; text-align: left; }
+        .admin-box h4 { margin-top: 0; color: #856404; }
     </style>
 </head>
 <body>
@@ -36,20 +43,37 @@
     <div id="app-section" class="card hidden">
         <h3>Grupo: <span id="nombre-grupo" style="color: #007bff;">---</span></h3>
         
-        <button id="btn-ocupado">Ocupado BRC por 1 hora</button>
+        <div id="selectores-tiempo" class="btn-group">
+            <button class="btn-time" data-mins="15">15 min</button>
+            <button class="btn-time" data-mins="30">30 min</button>
+            <button class="btn-time" data-mins="60">1 hora</button>
+        </div>
+
+        <button id="btn-detener" class="hidden">Liberar BRC Ahora ⏹️</button>
         
-        <div id="contador" class="hidden">01:00:00</div>
+        <div id="contador" class="hidden">00:00:00</div>
         <div id="encargado" class="hidden">Ocupado por: <span>---</span></div>
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <h4>Participantes:</h4>
+        <h4>Participantes (<span id="cant-actual">0</span>/<span id="limite-max">--</span>):</h4>
         <ul id="lista-participantes"></ul>
+
+        <div id="admin-panel" class="admin-box hidden">
+            <h4>Panel de Administrador ⭐</h4>
+            <label for="input-limite" style="font-size: 14px; font-weight: bold;">Límite de integrantes:</label>
+            <div style="display: flex; gap: 5px; margin-top: 5px;">
+                <input type="number" id="input-limite" min="1" style="width: 60%; margin: 0; padding: 6px;">
+                <button id="btn-actualizar-limite" style="width: 35%; margin: 0; font-size: 12px; padding: 8px; background-color: #856404;">Fijar</button>
+            </div>
+        </div>
+
+        <button id="btn-logout">Salir del Grupo 🚪</button>
     </div>
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, where, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
         import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging.js";
 
         const firebaseConfig = {
@@ -69,11 +93,12 @@
         let usuarioActual = null;
         let grupoActualId = null;
         let intervaloContador = null;
+        let esAdmin = false;
+        let desvincularEscuchaMiembros = null;
+        let desvincularEscuchaGrupo = null;
 
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/firebase-messaging-sw.js')
-            .then(reg => console.log('Service Worker registrado con éxito', reg))
-            .catch(err => console.error('Error al registrar Service Worker', err));
+            navigator.serviceWorker.register('/firebase-messaging-sw.js').catch(err => console.error(err));
         }
 
         document.getElementById('btn-login').addEventListener('click', async () => {
@@ -84,6 +109,26 @@
             if(!email || !password || !grupo) return alert("Por favor llena todos los campos");
 
             try {
+                // Verificar primero si el grupo existe y si está lleno
+                const grupoDocRef = doc(db, "grupos", grupo);
+                const grupoSnap = await getDoc(grupoDocRef);
+                
+                if (grupoSnap.exists()) {
+                    const datosGrupo = grupoSnap.data();
+                    const limite = datosGrupo.limiteUsuarios || 999;
+                    
+                    const qMiembros = query(collection(db, "usuarios"), where("grupoID", "==", grupo));
+                    const snapMiembros = await getDocs(qMiembros);
+                    
+                    // Si el usuario ya pertenecía al grupo, lo dejamos pasar aunque esté lleno
+                    let yaEsMiembro = false;
+                    snapMiembros.forEach(d => { if(d.data().email === email) yaEsMiembro = true; });
+
+                    if (snapMiembros.size >= limite && !yaEsMiembro) {
+                        return alert("El grupo está lleno. Capacidad máxima: " + limite);
+                    }
+                }
+
                 let userCredential;
                 try {
                     userCredential = await signInWithEmailAndPassword(auth, email, password);
@@ -94,6 +139,12 @@
                 }
 
                 const uid = userCredential.user.uid;
+                
+                // Si el grupo no existía en la base de datos, este usuario se vuelve el Admin creador
+                if (!grupoSnap.exists()) {
+                    await setDoc(grupoDocRef, { estado: "libre", limiteUsuarios: 10, creadorUid: uid });
+                }
+
                 await setDoc(doc(db, "usuarios", uid), { uid, email, grupoID: grupo }, { merge: true });
                 solicitarPermisoNotificaciones(uid);
 
@@ -105,105 +156,194 @@
         onAuthStateChanged(auth, async (user) => {
             if (user) {
                 usuarioActual = user;
+                
+                const userDocSnap = await getDoc(doc(db, "usuarios", user.uid));
+                if (!userDocSnap.exists() || !userDocSnap.data().grupoID) {
+                    // Si el usuario fue echado por el admin, lo mandamos al login
+                    ejecutarSalidaUI();
+                    return;
+                }
+
+                grupoActualId = userDocSnap.data().grupoID;
                 document.getElementById('auth-section').classList.add('hidden');
                 document.getElementById('app-section').classList.remove('hidden');
-                
-                const userDoc = await getDoc(doc(db, "usuarios", user.uid));
-                grupoActualId = userDoc.data().grupoID;
                 document.getElementById('nombre-grupo').innerText = grupoActualId.toUpperCase();
 
                 conectarGrupo(grupoActualId);
+            } else {
+                ejecutarSalidaUI();
             }
         });
 
         function conectarGrupo(grupoId) {
-            onSnapshot(doc(db, "grupos", grupoId), (docSnap) => {
+            if (desvincularEscuchaGrupo) desvincularEscuchaGrupo();
+            if (desvincularEscuchaMiembros) desvincularEscuchaMiembros();
+
+            // 1. Escuchar datos del grupo (Estado y límites)
+            desvincularEscuchaGrupo = onSnapshot(doc(db, "grupos", grupoId), (docSnap) => {
                 if (docSnap.exists()) {
                     const datos = docSnap.data();
+                    
+                    // Chequear si soy el admin
+                    esAdmin = (datos.creadorUid === usuarioActual.uid);
+                    if (esAdmin) {
+                        document.getElementById('admin-panel').classList.remove('hidden');
+                        document.getElementById('input-limite').value = datos.limiteUsuarios || 10;
+                    } else {
+                        document.getElementById('admin-panel').classList.add('hidden');
+                    }
+
+                    document.getElementById('limite-max').innerText = datos.limiteUsuarios || 10;
+
                     if (datos.estado === "ocupado") {
                         document.getElementById('encargado').classList.remove('hidden');
                         document.getElementById('encargado').querySelector('span').innerText = datos.solicitadoPor || "Desconocido";
                         iniciarContador(datos.finOcupado.toMillis());
-                        document.getElementById('btn-ocupado').disabled = true;
+                        document.getElementById('selectores-tiempo').classList.add('hidden');
+                        document.getElementById('btn-detener').classList.remove('hidden');
                     } else {
                         resetearContadorUI();
                     }
                 }
             });
 
+            // 2. Escuchar lista de miembros conectados
             const q = query(collection(db, "usuarios"), where("grupoID", "==", grupoId));
-            onSnapshot(q, (querySnapshot) => {
+            desvincularEscuchaMiembros = onSnapshot(q, (querySnapshot) => {
                 const lista = document.getElementById('lista-participantes');
                 lista.innerHTML = "";
-                querySnapshot.forEach((doc) => {
+                document.getElementById('cant-actual').innerText = querySnapshot.size;
+
+                let yoSigoEnLaLista = false;
+
+                querySnapshot.forEach((docSnap) => {
+                    const datosUser = docSnap.data();
+                    if (datosUser.uid === usuarioActual.uid) yoSigoEnLaLista = true;
+
                     const li = document.createElement('li');
-                    li.textContent = doc.data().email;
+                    li.textContent = datosUser.email;
+
+                    // Si soy admin y este integrante no soy yo mismo, le clavo botón de echar
+                    if (esAdmin && datosUser.uid !== usuarioActual.uid) {
+                        const btnEchar = document.createElement('button');
+                        btnEchar.textContent = "Echar ❌";
+                        btnEchar.className = "btn-echar";
+                        btnEchar.onclick = () => echarParticipante(datosUser.uid, datosUser.email);
+                        li.appendChild(btnEchar);
+                    }
+
                     lista.appendChild(li);
                 });
+
+                // Si el Admin me echó, mi usuario ya no figurará en la consulta de este grupo
+                if (!yoSigoEnLaLista && usuarioActual) {
+                    alert("Has sido removido de este grupo por el Administrador.");
+                    signoutProceso();
+                }
             });
         }
 
-        document.getElementById('btn-ocupado').addEventListener('click', async () => {
+        // ACCIÓN DE LOS BOTONES DE TIEMPO
+        document.querySelectorAll('.btn-time').forEach(boton => {
+            boton.addEventListener('click', async (e) => {
+                if (!grupoActualId || !usuarioActual) return;
+                const minutos = parseInt(e.target.getAttribute('data-mins'));
+                const tiempoFin = Date.now() + (minutos * 60 * 1000); 
+                await setDoc(doc(db, "grupos", grupoActualId), {
+                    estado: "ocupado",
+                    finOcupado: new Date(tiempoFin),
+                    solicitadoPor: usuarioActual.email
+                }, { merge: true });
+
+                enviarPushANotificar("¡BRC Ocupado! 🚨", `${usuarioActual.email} pidió el tiempo por ${minutos === 60 ? '1 hora' : minutos + ' minutos'}.`);
+            });
+        });
+
+        // ACCIÓN DE DETENER
+        document.getElementById('btn-detener').addEventListener('click', async () => {
             if (!grupoActualId || !usuarioActual) return;
-            
-            // 1 HORA EN MILISEGUNDOS (60 minutos * 60 segundos * 1000 ms)
-            const tiempoFin = Date.now() + (60 * 60 * 1000); 
-            const miEmail = usuarioActual.email;
+            await setDoc(doc(db, "grupos", grupoActualId), { estado: "libre", solicitadoPor: "" }, { merge: true });
+            enviarPushANotificar("BRC Libre ✅", `${usuarioActual.email} liberó el puesto.`);
+        });
 
-            await setDoc(doc(db, "grupos", grupoActualId), {
-                estado: "ocupado",
-                finOcupado: new Date(tiempoFin),
-                solicitadoPor: miEmail
-            }, { merge: true });
+        // ACTUALIZAR LÍMITE DE USUARIOS (SOLO ADMIN)
+        document.getElementById('btn-actualizar-limite').addEventListener('click', async () => {
+            const nuevoLimite = parseInt(document.getElementById('input-limite').value);
+            if (!nuevoLimite || nuevoLimite < 1) return alert("Pon un número válido");
+            await updateDoc(doc(db, "grupos", grupoActualId), { limiteUsuarios: nuevoLimite });
+            alert("Límite del grupo actualizado a " + nuevoLimite);
+        });
 
-            // ENVIAR NOTIFICACIÓN PUSH A LOS COMPAÑEROS VÍA VERCEL API
+        // ACCIÓN DE ECHAR PARTICIPANTE (SOLO ADMIN)
+        async function echarParticipante(uid, email) {
+            if (confirm(`¿Estás seguro de que deseas echar a ${email} del grupo?`)) {
+                // Borramos su asignación de grupo en la base de datos
+                await deleteDoc(doc(db, "usuarios", uid));
+            }
+        }
+
+        // LOGOUT / CAMBIAR DE GRUPO
+        document.getElementById('btn-logout').addEventListener('click', () => {
+            signoutProceso();
+        });
+
+        async function signoutProceso() {
+            if (usuarioActual) {
+                try {
+                    // Limpiamos el token push de este usuario para que no le lleguen más alertas de este grupo
+                    await updateDoc(doc(db, "usuarios", usuarioActual.uid), { tokenPush: "" });
+                } catch(e){}
+            }
+            signOut(auth);
+        }
+
+        function ejecutarSalidaUI() {
+            usuarioActual = null;
+            grupoActualId = null;
+            esAdmin = false;
+            if (desvincularEscuchaGrupo) desvincularEscuchaGrupo();
+            if (desvincularEscuchaMiembros) desvincularEscuchaMiembros();
+            resetearContadorUI();
+            document.getElementById('app-section').classList.add('hidden');
+            document.getElementById('auth-section').classList.remove('hidden');
+        }
+
+        async function enviarPushANotificar(titulo, mensaje) {
             try {
                 const q = query(collection(db, "usuarios"), where("grupoID", "==", grupoActualId));
                 const querySnapshot = await getDocs(q);
                 let listaTokens = [];
-
                 querySnapshot.forEach((doc) => {
                     const datosUsuario = doc.data();
                     if (datosUsuario.tokenPush && datosUsuario.uid !== usuarioActual.uid) {
                         listaTokens.push(datosUsuario.tokenPush);
                     }
                 });
-
                 if (listaTokens.length > 0) {
                     await fetch('/api/enviar-alerta', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            tokens: listaTokens,
-                            titulo: "¡BRC Ocupado! 🚨",
-                            mensaje: `${miEmail} pidió el tiempo por 1 hora.`
-                        })
+                        body: JSON.stringify({ tokens: listaTokens, titulo, mensaje })
                     });
                 }
-            } catch (err) {
-                console.error("Error al procesar envío de push:", err);
-            }
-        });
+            } catch (err) { console.error(err); }
+        }
 
         function iniciarContador(tiempoFin) {
             const contadorEl = document.getElementById('contador');
             contadorEl.classList.remove('hidden');
             if(intervaloContador) clearInterval(intervaloContador);
-
             intervaloContador = setInterval(() => {
                 const diferencia = tiempoFin - Date.now();
-
                 if (diferencia <= 0) {
                     clearInterval(intervaloContador);
                     updateDoc(doc(db, "grupos", grupoActualId), { estado: "libre" });
                     resetearContadorUI();
                     return;
                 }
-
                 const horas = Math.floor(diferencia / (1000 * 60 * 60));
                 const mins = Math.floor((diferencia % (1000 * 60 * 60)) / (1000 * 60));
                 const segs = Math.floor((diferencia % (1000 * 60)) / 1000);
-                
                 contadorEl.innerText = `${horas.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${segs.toString().padStart(2, '0')}`;
             }, 1000);
         }
@@ -212,7 +352,8 @@
             if(intervaloContador) clearInterval(intervaloContador);
             document.getElementById('contador').classList.add('hidden');
             document.getElementById('encargado').classList.add('hidden');
-            document.getElementById('btn-ocupado').disabled = false;
+            document.getElementById('selectores-tiempo').classList.remove('hidden');
+            document.getElementById('btn-detener').classList.add('hidden');
         }
 
         async function solicitarPermisoNotificaciones(uid) {
@@ -224,9 +365,7 @@
                         await setDoc(doc(db, "usuarios", uid), { tokenPush: token }, { merge: true });
                     }
                 }
-            } catch (error) {
-                console.error("Error al obtener token push", error);
-            }
+            } catch (error) {}
         }
     </script>
 </body>
