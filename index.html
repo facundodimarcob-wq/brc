@@ -18,6 +18,7 @@
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
         .hidden { display: none; }
         #contador { font-size: 28px; color: #dc3545; font-weight: bold; margin: 15px 0; }
+        #encargado { font-size: 14px; color: #666; font-style: italic; margin-bottom: 10px; }
         ul { list-style: none; padding: 0; text-align: left; }
         li { padding: 8px; border-bottom: 1px solid #eee; }
     </style>
@@ -35,9 +36,10 @@
     <div id="app-section" class="card hidden">
         <h3>Grupo: <span id="nombre-grupo" style="color: #007bff;">---</span></h3>
         
-        <button id="btn-ocupado">Ocupado BRC por 30 min</button>
+        <button id="btn-ocupado">Ocupado BRC por 1 hora</button>
         
-        <div id="contador" class="hidden">00:00</div>
+        <div id="contador" class="hidden">01:00:00</div>
+        <div id="encargado" class="hidden">Ocupado por: <span>---</span></div>
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
         <h4>Participantes:</h4>
@@ -47,10 +49,9 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, where } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
         import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging.js";
 
-        // TU CONFIGURACIÓN REAL DE FIREBASE
         const firebaseConfig = {
             apiKey: "AIzaSyBoB3CCORIJN23iND5SJ5yRzXyxCgrKlb8",
             authDomain: "fag-brc.firebaseapp.com",
@@ -69,14 +70,12 @@
         let grupoActualId = null;
         let intervaloContador = null;
 
-        // Registrar el Service Worker automáticamente para las notificaciones
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/firebase-messaging-sw.js')
             .then(reg => console.log('Service Worker registrado con éxito', reg))
             .catch(err => console.error('Error al registrar Service Worker', err));
         }
 
-        // LÓGICA DE ACCESO
         document.getElementById('btn-login').addEventListener('click', async () => {
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
@@ -95,7 +94,7 @@
                 }
 
                 const uid = userCredential.user.uid;
-                await setDoc(doc(db, "usuarios", uid), { email, grupoID: grupo }, { merge: true });
+                await setDoc(doc(db, "usuarios", uid), { uid, email, grupoID: grupo }, { merge: true });
                 solicitarPermisoNotificaciones(uid);
 
             } catch (error) {
@@ -103,7 +102,6 @@
             }
         });
 
-        // ESCUCHAR ESTADO DEL USUARIO
         onAuthStateChanged(auth, async (user) => {
             if (user) {
                 usuarioActual = user;
@@ -118,13 +116,13 @@
             }
         });
 
-        // SINCRONIZACIÓN EN TIEMPO REAL
         function conectarGrupo(grupoId) {
-            // 1. Escuchar estado del botón y contador
             onSnapshot(doc(db, "grupos", grupoId), (docSnap) => {
                 if (docSnap.exists()) {
                     const datos = docSnap.data();
                     if (datos.estado === "ocupado") {
+                        document.getElementById('encargado').classList.remove('hidden');
+                        document.getElementById('encargado').querySelector('span').innerText = datos.solicitadoPor || "Desconocido";
                         iniciarContador(datos.finOcupado.toMillis());
                         document.getElementById('btn-ocupado').disabled = true;
                     } else {
@@ -133,7 +131,6 @@
                 }
             });
 
-            // 2. Escuchar lista de miembros conectados
             const q = query(collection(db, "usuarios"), where("grupoID", "==", grupoId));
             onSnapshot(q, (querySnapshot) => {
                 const lista = document.getElementById('lista-participantes');
@@ -146,19 +143,48 @@
             });
         }
 
-        // ACCIÓN DEL BOTÓN
         document.getElementById('btn-ocupado').addEventListener('click', async () => {
-            if (!grupoActualId) return;
-            const tiempoFin = Date.now() + (30 * 60 * 1000); // Ahora + 30 minutos
+            if (!grupoActualId || !usuarioActual) return;
+            
+            // 1 HORA EN MILISEGUNDOS (60 minutos * 60 segundos * 1000 ms)
+            const tiempoFin = Date.now() + (60 * 60 * 1000); 
+            const miEmail = usuarioActual.email;
 
             await setDoc(doc(db, "grupos", grupoActualId), {
                 estado: "ocupado",
                 finOcupado: new Date(tiempoFin),
-                solicitadoPor: usuarioActual.email
+                solicitadoPor: miEmail
             }, { merge: true });
+
+            // ENVIAR NOTIFICACIÓN PUSH A LOS COMPAÑEROS VÍA VERCEL API
+            try {
+                const q = query(collection(db, "usuarios"), where("grupoID", "==", grupoActualId));
+                const querySnapshot = await getDocs(q);
+                let listaTokens = [];
+
+                querySnapshot.forEach((doc) => {
+                    const datosUsuario = doc.data();
+                    if (datosUsuario.tokenPush && datosUsuario.uid !== usuarioActual.uid) {
+                        listaTokens.push(datosUsuario.tokenPush);
+                    }
+                });
+
+                if (listaTokens.length > 0) {
+                    await fetch('/api/enviar-alerta', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            tokens: listaTokens,
+                            titulo: "¡BRC Ocupado! 🚨",
+                            mensaje: `${miEmail} pidió el tiempo por 1 hora.`
+                        })
+                    });
+                }
+            } catch (err) {
+                console.error("Error al procesar envío de push:", err);
+            }
         });
 
-        // MANEJO DEL TIEMPO
         function iniciarContador(tiempoFin) {
             const contadorEl = document.getElementById('contador');
             contadorEl.classList.remove('hidden');
@@ -174,24 +200,25 @@
                     return;
                 }
 
+                const horas = Math.floor(diferencia / (1000 * 60 * 60));
                 const mins = Math.floor((diferencia % (1000 * 60 * 60)) / (1000 * 60));
                 const segs = Math.floor((diferencia % (1000 * 60)) / 1000);
-                contadorEl.innerText = `${mins.toString().padStart(2, '0')}:${segs.toString().padStart(2, '0')}`;
+                
+                contadorEl.innerText = `${horas.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${segs.toString().padStart(2, '0')}`;
             }, 1000);
         }
 
         function resetearContadorUI() {
             if(intervaloContador) clearInterval(intervaloContador);
             document.getElementById('contador').classList.add('hidden');
+            document.getElementById('encargado').classList.add('hidden');
             document.getElementById('btn-ocupado').disabled = false;
         }
 
-        // SOLICITAR PUSH TOKEN
         async function solicitarPermisoNotificaciones(uid) {
             try {
                 const permission = await Notification.requestPermission();
                 if (permission === 'granted') {
-                    // Reemplaza 'TU_PUBLIC_VAPID_KEY' con la clave de tu consola de Firebase
                     const token = await getToken(messaging, { vapidKey: 'BK2zWq619-EMLY9Wu_RlBBiWHg0gAtDW7X2mlXD50VO8Nwc5xRIjGNCybV0yTRg-ZCUojFtxw94ewOWaxR5uF60' });
                     if (token) {
                         await setDoc(doc(db, "usuarios", uid), { tokenPush: token }, { merge: true });
